@@ -13,6 +13,9 @@ const PURL_ECOSYSTEMS: Record<Ecosystem, string> = {
   PyPI: 'pypi',
   Pub: 'pub',
   RubyGems: 'gem',
+  Debian: 'deb',
+  GIT: 'git',
+  VSCode: 'vscode',
 } as const;
 
 function urlEncode(packageName: string): string {
@@ -29,6 +32,9 @@ export function packageToPurl(
 
   if (purlType === 'maven') {
     packageNamePurl = packageName.replace(':', '/');
+  }
+  if (purlType === 'deb') {
+    packageNamePurl = `debian/${packageName}`;
   }
 
   return `pkg:${purlType}/${urlEncode(packageNamePurl)}`;

@@ -11,5 +11,9 @@ export const ecosystems = [
   'Pub',
   'PyPI',
   'RubyGems',
+  // additional
+  'Debian',
+  'GIT',
+  'VSCode',
 ] as const;
 export type Ecosystem = (typeof ecosystems)[number];
