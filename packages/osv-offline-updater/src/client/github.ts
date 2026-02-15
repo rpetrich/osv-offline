@@ -5,7 +5,7 @@ import { DateTime } from 'luxon';
 export class GitHub {
   private readonly octokit: Octokit;
   private readonly baseParameters: { owner: string; repo: string } = {
-    owner: 'renovatebot',
+    owner: 'rpetrich',
     repo: 'osv-offline',
   };
 
