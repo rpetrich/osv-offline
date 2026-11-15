@@ -1,51 +1,258 @@
-import { tmpdir } from 'os';
-import path from 'path';
-import Datastore from '@seald-io/nedb';
-import { Ecosystem, ecosystems } from './ecosystem';
-import type { Vulnerability } from './osv';
-import type { Osv } from '..';
-import { packageToPurl } from './purl-helper';
+import { closeSync, createReadStream, read as fsRead, openSync } from 'node:fs';
+import { readFile, stat } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import readline from 'node:readline';
+import { promisify } from 'node:util';
+import {
+  DatabaseIndexBuilder,
+  type DatabaseRecord,
+  type EcosystemIndex,
+  type IndexCheck,
+  getIndexFileName,
+  parseIndex,
+} from './db-index.ts';
+import { Ecosystem } from './ecosystem.ts';
+import { createLogger } from './logger.ts';
+import type { Vulnerability } from './osv.ts';
+import { packageToPurl } from './purl-helper.ts';
+
+const logger = createLogger('osv-offline:db');
+const readAsync = promisify(fsRead);
+
+interface EcosystemData {
+  filePath: string;
+  fd: number;
+  index: EcosystemIndex;
+  mtime: number;
+}
 
 export class OsvOfflineDb {
+  private disposed = false;
   public static readonly rootDirectory =
     process.env.OSV_OFFLINE_ROOT_DIR ?? path.join(tmpdir(), 'osv-offline');
-  private db = {} as Record<Ecosystem, Datastore<Vulnerability>>;
 
-  // eslint-disable-next-line @typescript-eslint/no-empty-function
-  private constructor() {}
+  private _data: Partial<Record<Ecosystem, EcosystemData>> = {};
+  private _db: Partial<Record<Ecosystem, Promise<EcosystemData | null>>> = {};
+  private _pendingAcs = new Set<AbortController>();
 
-  private async initialize(): Promise<void> {
-    for (const ecosystem of ecosystems) {
-      this.db[ecosystem] = new Datastore({
-        filename: path.join(
-          OsvOfflineDb.rootDirectory,
-          `${ecosystem.toLowerCase()}.nedb`
-        ),
-      });
-      await this.db[ecosystem].loadDatabaseAsync();
+  private readonly _exitHandler = () => {
+    if (this.disposed) {
+      return;
+    }
+    logger.warn('Databases are not disposed! Please explicitly dispose.');
+    this[Symbol.dispose]();
+  };
+
+  private constructor() {
+    process.on('exit', this._exitHandler);
+  }
+
+  private async _load(ecosystem: Ecosystem): Promise<EcosystemData | null> {
+    const cached = this._data[ecosystem];
+    if (cached) {
+      const fileStat = await stat(cached.filePath).catch(() => null);
+
+      // Check if the data currently in memory is still the same object we checked against
+      // If not, another request has already handled the reload/unload
+      if (this._data[ecosystem] !== cached) {
+        return (this._db[ecosystem] ??= this._init(ecosystem));
+      }
+
+      if (fileStat?.mtimeMs !== cached.mtime) {
+        logger.debug(
+          fileStat
+            ? `File changed for ecosystem '${ecosystem}', reloading ...`
+            : `File removed for ecosystem '${ecosystem}', unloading ...`,
+        );
+        // Delete references before unloading to prevent concurrent callers from picking up stale data
+        delete this._data[ecosystem];
+        delete this._db[ecosystem];
+        this._unload(cached);
+      }
+    }
+
+    return (this._db[ecosystem] ??= this._init(ecosystem));
+  }
+
+  private async _init(ecosystem: Ecosystem): Promise<EcosystemData | null> {
+    logger.trace(`Initializing ecosystem '${ecosystem}' ...`);
+    const ac = new AbortController();
+    this._pendingAcs.add(ac);
+
+    try {
+      const filePath = path.join(OsvOfflineDb.rootDirectory, `${ecosystem.toLowerCase()}.nedb`);
+
+      const fileStat = await stat(filePath).catch(() => null);
+      if (!fileStat) {
+        logger.debug(`Missing data for ecosystem '${ecosystem}'`);
+        delete this._db[ecosystem];
+        return null;
+      }
+
+      const data: EcosystemData = {
+        filePath,
+        fd: openSync(filePath, 'r'),
+        index: new Map(),
+        mtime: fileStat.mtimeMs,
+      };
+
+      const index = await this._loadIndex(ecosystem, data, fileStat.size);
+      if (index) {
+        logger.trace(`Using precomputed index for ecosystem '${ecosystem}'`);
+        data.index = index;
+      } else {
+        await this._buildIndex(ac, data);
+      }
+
+      if (ac.signal.aborted) {
+        logger.debug(`Initializing ecosystem '${ecosystem}' aborted.`);
+        delete this._db[ecosystem];
+        this._unload(data);
+        return null;
+      }
+
+      this._data[ecosystem] = data;
+      logger.trace(`Initializing ecosystem '${ecosystem}' done.`);
+
+      return data;
+    } finally {
+      this._pendingAcs.delete(ac);
     }
   }
 
-  public static async create(): Promise<OsvOfflineDb> {
+  /**
+   * Returns the precomputed index of an ecosystem database, if there is one and it was built from this database.
+   */
+  private async _loadIndex(
+    ecosystem: Ecosystem,
+    data: EcosystemData,
+    size: number,
+  ): Promise<EcosystemIndex | null> {
+    const content = await readFile(
+      path.join(OsvOfflineDb.rootDirectory, getIndexFileName(ecosystem)),
+      'utf8',
+    ).catch(() => null);
+    if (content === null) {
+      return null;
+    }
+    const parsed = parseIndex(content, size);
+    if (!parsed || !(await this._isLastRecord(data, parsed.last))) {
+      logger.debug(`Ignoring outdated index for ecosystem '${ecosystem}'`);
+      return null;
+    }
+    return parsed.index;
+  }
+
+  /**
+   * Checks that the database holds the last record the index was built with.
+   */
+  private async _isLastRecord(data: EcosystemData, last: IndexCheck | undefined): Promise<boolean> {
+    if (!last) {
+      return true;
+    }
+    const record = await this._readRecord(data, last).catch(() => null);
+    return record?._id === last.id;
+  }
+
+  private async _readRecord(
+    data: EcosystemData,
+    { offset, length }: { offset: number; length: number },
+  ): Promise<DatabaseRecord> {
+    const buffer = Buffer.allocUnsafe(length);
+    const { bytesRead } = await readAsync(data.fd, buffer, 0, length, offset);
+    return JSON.parse(buffer.toString('utf8', 0, bytesRead)) as DatabaseRecord;
+  }
+
+  private async _buildIndex(ac: AbortController, data: EcosystemData): Promise<void> {
+    const fileStream = createReadStream(data.filePath);
+    const rl = readline.createInterface({
+      input: fileStream,
+      crlfDelay: Infinity,
+    });
+
+    const builder = new DatabaseIndexBuilder();
+    for await (const line of rl) {
+      if (ac.signal.aborted) {
+        fileStream.destroy();
+        return;
+      }
+      let record: DatabaseRecord | undefined;
+      try {
+        record = JSON.parse(line) as DatabaseRecord;
+      } catch {
+        // Skip malformed lines
+      }
+      builder.add(line, record);
+    }
+    data.index = builder.index;
+  }
+
+  public static create(): OsvOfflineDb {
     const osvOfflineDb = new OsvOfflineDb();
-    await osvOfflineDb.initialize();
     return osvOfflineDb;
   }
 
-  async query(
-    ecosystem: Ecosystem,
-    packageName: string
-  ): Promise<Osv.Vulnerability[]> {
-    return await this.db[ecosystem].findAsync({
-      affected: {
-        $elemMatch: {
-          package: {
-            name: packageName,
-            ecosystem,
-            purl: packageToPurl(ecosystem, packageName),
-          },
-        },
-      },
-    });
+  async query(ecosystem: Ecosystem, packageName: string): Promise<Vulnerability[]> {
+    if (this.disposed) {
+      throw new Error('Database disposed');
+    }
+    const data = await this._load(ecosystem);
+
+    if (!data) {
+      return [];
+    }
+
+    const pointers = data.index.get(packageName);
+
+    if (!pointers || pointers.length === 0) {
+      return [];
+    }
+
+    const advisories: Vulnerability[] = await Promise.all(
+      pointers.map((pointer) => this._readRecord(data, pointer)),
+    );
+
+    if (this.disposed) {
+      return [];
+    }
+
+    const targetPurl = packageToPurl(ecosystem, packageName);
+    return advisories.filter((vuln) =>
+      vuln.affected?.some(
+        (a) =>
+          a.package?.name === packageName &&
+          (a.package.ecosystem === ecosystem || a.package.ecosystem.startsWith(`${ecosystem}:`)) &&
+          a.package.purl === targetPurl,
+      ),
+    );
+  }
+
+  [Symbol.dispose](): void {
+    if (this.disposed) {
+      return;
+    }
+    logger.trace(`Disposing databases ...`);
+    this.disposed = true;
+    process.off('exit', this._exitHandler);
+
+    for (const ac of this._pendingAcs) {
+      ac.abort();
+    }
+    this._pendingAcs.clear();
+
+    for (const d of Object.values(this._data)) {
+      this._unload(d);
+    }
+    this._db = {};
+    this._data = {};
+  }
+
+  private _unload(d: EcosystemData): void {
+    try {
+      closeSync(d.fd);
+    } catch {
+      // ignore
+    }
   }
 }

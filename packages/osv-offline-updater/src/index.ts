@@ -1,56 +1,64 @@
-import fs from 'fs-extra';
-import { Osv, OsvOfflineDb, ecosystems } from '@renovatebot/osv-offline-db';
-import { GitHub } from './client/github';
-import signale from 'signale';
-import Datastore from '@seald-io/nedb';
-import { OsvDownloader } from './client/osv';
-import path from 'path';
+import path from 'node:path';
+import { OsvOfflineDb, type SplitIndex, ecosystems } from '@renovatebot/osv-offline-db';
 import AdmZip from 'adm-zip';
+import fs from 'fs-extra';
+import { DateTime } from 'luxon';
+import signale from 'signale';
+import { GitHub, getDatabaseTag, getSplitBaseUrl } from './client/github.ts';
+import { OsvDownloader } from './client/osv.ts';
+import { writeDatabase } from './lib/database.ts';
+import { readVulnerabilities } from './lib/osv-zip.ts';
+import { writeSplitFiles, writeSplitIndex } from './lib/split.ts';
 
-async function deleteIfExists(path: string): Promise<void> {
-  try {
-    await fs.remove(path);
-    signale.info(`Deleted existing database at ${path}`);
-  } catch {
-    signale.info(`No existing database found at ${path}`);
-  }
+if (!fs.existsSync(OsvOfflineDb.rootDirectory)) {
+  await fs.mkdir(OsvOfflineDb.rootDirectory);
 }
 
-// eslint-disable-next-line @typescript-eslint/no-floating-promises
-(async () => {
-  if (!fs.existsSync(OsvOfflineDb.rootDirectory)) {
-    await fs.mkdir(OsvOfflineDb.rootDirectory);
+const generated = new Date();
+// the release of the run holds the zip and the files of the split format
+const tag = getDatabaseTag(generated);
+// e.g. 20261027120513: the version of the split files
+const version = DateTime.fromJSDate(generated, { zone: 'utc' }).toFormat('yyyyMMddHHmmss');
+const splitDir = path.join(OsvOfflineDb.rootDirectory, 'split');
+const pagesDir =
+  process.env.OSV_OFFLINE_PAGES_DIR ?? path.join(OsvOfflineDb.rootDirectory, 'pages');
+
+const zip = new AdmZip();
+const splitEcosystems: SplitIndex['ecosystems'] = {};
+
+const osvZip = path.join(OsvOfflineDb.rootDirectory, 'osv-all.zip');
+
+for (const ecosystem of ecosystems) {
+  signale.info(`Processing ecosystem ${ecosystem}`);
+  await new OsvDownloader(ecosystem).download(osvZip);
+  signale.info(`Downloaded vulnerabilities for ecosystem ${ecosystem}`);
+
+  const files = await writeDatabase(
+    OsvOfflineDb.rootDirectory,
+    ecosystem,
+    readVulnerabilities(osvZip),
+  );
+  await fs.remove(osvZip);
+  for (const file of files) {
+    zip.addLocalFile(file);
   }
+  splitEcosystems[ecosystem] = await writeSplitFiles(splitDir, ecosystem, version, files);
+}
 
-  const zip = new AdmZip();
+const splitIndex = await writeSplitIndex(
+  path.join(pagesDir, 'v2', 'index.json'),
+  splitEcosystems,
+  generated,
+  getSplitBaseUrl(tag),
+);
 
-  for (const ecosystem of ecosystems) {
-    signale.info(`Processing ecosystem ${ecosystem}`);
-    const databasePath = path.join(
-      OsvOfflineDb.rootDirectory,
-      `${ecosystem.toLowerCase()}.nedb`
-    );
-    await deleteIfExists(databasePath);
-    const db = new Datastore<Osv.Vulnerability>({
-      filename: databasePath,
-    });
-    await db.loadDatabaseAsync();
-    const osv = new OsvDownloader(ecosystem);
-    const vulnerabilities = await osv.download();
-    signale.info(
-      `Downloaded ${vulnerabilities.length} vulnerabilities for ecosystem ${ecosystem}`
-    );
-    await db.insertAsync(vulnerabilities);
-    zip.addLocalFile(databasePath);
-  }
+const zipFile = zip.toBuffer();
 
-  const zipFile = zip.toBuffer();
-
-  if (process.env.GITHUB_TOKEN) {
-    signale.info('Uploading databases');
-    const gh = new GitHub();
-    await gh.uploadDatabase(zipFile);
-  } else {
-    signale.warn('Skipping upload of databases');
-  }
-})();
+if (process.env.GITHUB_TOKEN) {
+  signale.info('Uploading databases');
+  const gh = new GitHub();
+  // the workflow deploys the index to GitHub Pages afterwards, once the files it lists are published
+  await gh.uploadDatabase(tag, zipFile, splitDir, splitIndex);
+} else {
+  signale.warn('Skipping upload of databases');
+}

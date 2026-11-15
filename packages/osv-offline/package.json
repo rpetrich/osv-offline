@@ -1,33 +1,36 @@
 {
   "name": "@renovatebot/osv-offline",
   "version": "0.0.0-semantic-release",
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
   "license": "MIT",
-  "type": "commonjs",
-  "publishConfig": {
-    "access": "public"
-  },
   "repository": {
     "type": "git",
     "url": "https://github.com/renovatebot/osv-offline.git"
   },
+  "type": "module",
+  "main": "dist/index.js",
+  "publishConfig": {
+    "access": "public"
+  },
   "dependencies": {
     "@renovatebot/osv-offline-db": "workspace:*",
-    "adm-zip": "~0.5.16",
-    "debug": "^4.4.3",
-    "fs-extra": "^11.3.3",
-    "got": "^11.8.6",
-    "luxon": "^3.7.2"
+    "fs-extra": "^11.4.1",
+    "got": "^15.1.0",
+    "luxon": "^3.7.2",
+    "ms": "^2.1.3",
+    "yauzl": "^3.4.0"
   },
   "devDependencies": {
-    "@types/adm-zip": "0.5.7",
-    "@types/debug": "4.1.12",
+    "@types/adm-zip": "0.6.0",
     "@types/fs-extra": "11.0.4",
-    "@types/luxon": "3.7.1",
-    "@types/node": "22.19.10"
+    "@types/luxon": "3.7.6",
+    "@types/ms": "2.1.0",
+    "@types/node": "24.19.2",
+    "@types/yauzl": "3.4.0",
+    "adm-zip": "0.6.1",
+    "vitest": "5.1.0"
   },
   "engines": {
-    "node": ">=22.12.0"
+    "node": ">=24.11.0",
+    "pnpm": ">=10.0.0"
   }
 }

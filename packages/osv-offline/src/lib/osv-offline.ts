@@ -1,26 +1,38 @@
-import { Ecosystem, Osv, OsvOfflineDb } from '@renovatebot/osv-offline-db';
-import { tryDownloadDb } from './download';
-import debug from 'debug';
+import { Ecosystem, Osv, OsvOfflineDb, createLogger } from '@renovatebot/osv-offline-db';
+import { tryDownloadDb } from './download.ts';
+import { SplitDownloader } from './split.ts';
 
-const logger = debug('osv-offline:download');
+const logger = createLogger('osv-offline:download');
+
+/**
+ * Whether the databases are downloaded in the split format, one ecosystem at a time, instead of as one zip.
+ */
+function useSplitFormat(): boolean {
+  return process.env.OSV_OFFLINE_DATABASE_FORMAT?.toLowerCase() === 'split';
+}
 
 export class OsvOffline {
-  private osvOfflineDb!: OsvOfflineDb;
+  private osvOfflineDb: OsvOfflineDb;
+  private readonly splitDownloader = useSplitFormat() ? new SplitDownloader() : undefined;
 
-  // eslint-disable-next-line @typescript-eslint/no-empty-function
-  protected constructor() {}
+  protected constructor() {
+    logger.trace('Initializing databases ...');
+    this.osvOfflineDb = OsvOfflineDb.create();
+    logger.trace('Initializing databases done.');
+  }
 
   /**
    * Asynchronous code required as part of class instantiation
    */
-  private async initialize(): Promise<void> {
+  private static async initialize(): Promise<void> {
+    // the split format downloads each ecosystem on its first query
+    if (useSplitFormat()) {
+      return;
+    }
     const result = await tryDownloadDb();
     if (!result.success) {
       throw result.error;
     }
-    logger('Initializing databases ...');
-    this.osvOfflineDb = await OsvOfflineDb.create();
-    logger('Initializing databases done.');
   }
 
   /**
@@ -28,8 +40,8 @@ export class OsvOffline {
    * @returns A new instance of {@link OsvOffline}
    */
   static async create(): Promise<OsvOffline> {
+    await OsvOffline.initialize();
     const instance = new OsvOffline();
-    await instance.initialize();
     return instance;
   }
 
@@ -41,8 +53,13 @@ export class OsvOffline {
    */
   async getVulnerabilities(
     ecosystem: Ecosystem,
-    packageName: string
+    packageName: string,
   ): Promise<Osv.Vulnerability[]> {
+    await this.splitDownloader?.ensure(ecosystem);
     return this.osvOfflineDb.query(ecosystem, packageName);
+  }
+
+  [Symbol.dispose](): void {
+    this.osvOfflineDb?.[Symbol.dispose]();
   }
 }

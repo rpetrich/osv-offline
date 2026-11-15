@@ -1,6 +1,32 @@
+strictPeerDependencies: true
+dedupePeers: true
+# updates are handled by Renovate itself
+updateNotifier: false
+
 packages:
   - packages/*
 
-ignoredBuiltDependencies:
-  - esbuild
-  - unrs-resolver
+allowBuilds:
+  esbuild: false
+  unrs-resolver: false
+  # downloads its prebuilt native binding
+  zstd-napi: true
+
+# in line with https://github.com/renovatebot/.github/blob/main/default.json,
+# all non-Renovate or non-Containerbase packages should only be installed after
+# 7 days
+minimumReleaseAge: 10080
+minimumReleaseAgeExclude:
+  - '@renovatebot/detect-tools'
+  - '@renovatebot/osv-offline'
+  - '@renovatebot/pep440'
+  - '@renovatebot/pgp'
+  - '@renovatebot/ruby-semver'
+  - '@containerbase/base'
+  - '@containerbase/oxlint-plugin'
+  - '@containerbase/istanbul-reports-html'
+  - '@containerbase/semantic-release-pnpm'
+
+# currently broken
+# https://github.com/pnpm/pnpm/issues/11238
+minimumReleaseAgeStrict: false

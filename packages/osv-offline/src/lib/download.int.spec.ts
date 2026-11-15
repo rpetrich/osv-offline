@@ -1,19 +1,20 @@
+import path from 'path';
 import { OsvOfflineDb } from '@renovatebot/osv-offline-db';
 import fs from 'fs-extra';
-import path from 'path';
-import { tryDownloadDb } from './download';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
+import { tryDownloadDb } from './download.ts';
 
 describe('packages/osv-offline/src/lib/download.int', () => {
   describe('tryDownloadDb', () => {
+    afterAll(async () => {
+      await fs.rm(OsvOfflineDb.rootDirectory, { recursive: true, force: true });
+    });
+
     beforeEach(() => {
       delete process.env.OSV_OFFLINE_DISABLE_DOWNLOAD;
     });
     afterAll(async () => {
-      const zipFilePath = path.join(
-        OsvOfflineDb.rootDirectory,
-        'osv-offline.zip'
-      );
+      const zipFilePath = path.join(OsvOfflineDb.rootDirectory, 'osv-offline.zip');
       await fs.rm(zipFilePath);
     });
 
@@ -28,10 +29,7 @@ describe('packages/osv-offline/src/lib/download.int', () => {
     it('skips if it should skip', async () => {
       process.env.OSV_OFFLINE_DISABLE_DOWNLOAD = 'true';
       await fs.ensureDir(OsvOfflineDb.rootDirectory);
-      const zipFilePath = path.join(
-        OsvOfflineDb.rootDirectory,
-        'osv-offline.zip'
-      );
+      const zipFilePath = path.join(OsvOfflineDb.rootDirectory, 'osv-offline.zip');
       await fs.writeFile(zipFilePath, Buffer.from([]));
 
       const result = await tryDownloadDb();
@@ -43,10 +41,7 @@ describe('packages/osv-offline/src/lib/download.int', () => {
 
     it('skips download if less than 1 day old', async () => {
       await fs.ensureDir(OsvOfflineDb.rootDirectory);
-      const zipFilePath = path.join(
-        OsvOfflineDb.rootDirectory,
-        'osv-offline.zip'
-      );
+      const zipFilePath = path.join(OsvOfflineDb.rootDirectory, 'osv-offline.zip');
       await fs.writeFile(zipFilePath, Buffer.from([]));
 
       const result = await tryDownloadDb();

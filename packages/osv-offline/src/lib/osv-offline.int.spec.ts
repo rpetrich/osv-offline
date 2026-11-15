@@ -1,5 +1,7 @@
-import { OsvOffline } from './osv-offline';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { OsvOfflineDb } from '@renovatebot/osv-offline-db';
+import fs from 'fs-extra';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { OsvOffline } from './osv-offline.ts';
 
 describe('packages/osv-offline/src/lib/osv-offline.int', () => {
   let osvOffline: OsvOffline;
@@ -8,10 +10,9 @@ describe('packages/osv-offline/src/lib/osv-offline.int', () => {
     osvOffline = await OsvOffline.create();
   });
 
-  describe('create', () => {
-    it('create', async () => {
-      await expect(OsvOffline.create()).resolves.not.toThrow();
-    });
+  afterAll(async () => {
+    osvOffline[Symbol.dispose]();
+    await fs.rm(OsvOfflineDb.rootDirectory, { recursive: true, force: true });
   });
 
   describe('getVulnerabilities', () => {
@@ -22,10 +23,7 @@ describe('packages/osv-offline/src/lib/osv-offline.int', () => {
     });
 
     it('returns empty array for invalid package', async () => {
-      const result = await osvOffline.getVulnerabilities(
-        'npm',
-        'this-package-doesnt-exist'
-      );
+      const result = await osvOffline.getVulnerabilities('npm', 'this-package-doesnt-exist');
 
       expect(result).toEqual([]);
     });

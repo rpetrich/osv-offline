@@ -1,5 +1,5 @@
 import { env } from 'node:process';
-import { defineConfig, coverageConfigDefaults } from 'vitest/config';
+import { coverageConfigDefaults, defineConfig } from 'vitest/config';
 
 const ci = !!env.CI;
 
@@ -13,14 +13,15 @@ export default defineConfig({
     reporters: ci ? ['verbose', 'github-actions', 'junit'] : ['default'],
     coverage: {
       provider: 'v8',
-      reporter: ci
-        ? ['text-summary', 'json']
-        : ['text-summary', 'html', 'json'],
+      reporter: ci ? ['text-summary', 'json'] : ['text-summary', 'html', 'json'],
       enabled: ci ? true : undefined,
       reportOnFailure: true,
       exclude: [
         ...coverageConfigDefaults.exclude,
-        'packages/osv-offline-updater/**',
+        // the updater script and its OSV download client
+        'packages/osv-offline-updater/src/index.ts',
+        'packages/osv-offline-updater/src/client/osv.ts',
+        'packages/osv-offline-updater/dist/**',
       ],
     },
   },
